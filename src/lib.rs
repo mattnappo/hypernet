@@ -7,8 +7,11 @@ use std::{
     collections::{HashMap, HashSet},
     hash::{Hash, Hasher},
     net::SocketAddr,
+    process::Command,
     sync::{Arc, Mutex},
 };
+
+const NODE_BINARY: &str = "./target/debug/hypernode";
 
 mod util {
     pub fn get_available_ports(n: u16) -> Vec<u16> {
@@ -143,17 +146,20 @@ impl Hypercube {
         // Generate free system addresses, which will then be assigned to nodes
         let addrs = util::get_available_ports(n as u16)
             .into_iter()
-            .map(|port| format!("127.0.0.1:{port}").parse().unwrap());
+            .map(|port| format!("127.0.0.1:{port}").parse().unwrap())
+            .collect::<Vec<_>>();
 
         // Make the Hypercube id mapping
         // Map from id to Set(ident) of adjacent nodes, where ident is (id,addr) pair
-        let graph: HashMap<u16, HashSet<Identity>> = addrs
-            .enumerate()
-            .map(|(i, addr)| {
+        let graph: HashMap<u16, HashSet<Identity>> = (0..n)
+            .map(|i| {
                 (
                     i as u16,
                     (0..d)
-                        .map(|k| Identity::new((i as u16) ^ 2u16.pow(k.into()), addr))
+                        .map(|k| {
+                            let id = (i as u16) ^ 2u16.pow(k.into());
+                            Identity::new(id, addrs[id as usize])
+                        })
                         .collect::<HashSet<Identity>>(),
                 )
             })
@@ -164,7 +170,9 @@ impl Hypercube {
 
     /// Start the hypercube. Spin up 2**n `Node` processes and make them
     /// start listening for requests
-    pub fn start(&self) {}
+    pub fn start(&self) {
+        //Command::new(NODE_BINARY).args([])
+    }
 
     /// Send data to all nodes, from an id
     pub fn broadcast<T>(&self, from: u32, data: T) {}
@@ -176,6 +184,8 @@ pub mod tests {
     #[test]
     fn test_new() {
         let cube: Hypercube = Hypercube::new(3);
+
+        println!("{cube:#?}");
 
         let m: HashMap<u16, HashSet<u16>> = cube
             .graph
