@@ -9,9 +9,14 @@ edition = "2021"
 path = "src/main.rs"
 name = "hypernet"
 
+[[bin]]
+path = "src/node.rs"
+name = "hypernode"
+
 [lib]
 path = "src/lib.rs"
 
 [dependencies]
 async-std = { version = "1.6", features = ["attributes"] }
+futures = "0.3"
 

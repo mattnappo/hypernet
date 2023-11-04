@@ -1,3 +1,6 @@
+use hypernet::Hypercube;
+
 fn main() {
-    println!("Hello, world!");
+    let cube = Hypercube::new(3);
+    cube.start();
 }
