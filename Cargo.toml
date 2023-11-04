@@ -13,3 +13,5 @@ name = "hypernet"
 path = "src/lib.rs"
 
 [dependencies]
+async-std = { version = "1.6", features = ["attributes"] }
+
