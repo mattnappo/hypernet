@@ -14,11 +14,16 @@ use std::{
 const NODE_BINARY: &str = "./target/debug/hypernode";
 
 mod util {
-    pub fn get_available_ports(n: u16) -> Vec<u16> {
-        (8000..(8000 + n * 4))
+    pub fn get_available_ports(n: u16) -> Option<Vec<u16>> {
+        let ports = (8000..(12000))
             .filter(|port| port_is_available(*port))
             .take(n as usize)
-            .collect::<Vec<u16>>()
+            .collect::<Vec<u16>>();
+
+        match ports.len() == 4 {
+            true => Some(ports),
+            _ => None
+        }
     }
 
     fn port_is_available(port: u16) -> bool {
@@ -31,7 +36,9 @@ mod util {
 
 /// A request to a `Hypernode` on the network
 enum Request<T: Default> {
+    Message(T),
     Broadcast(T),
+    AllGather(T),
     //Scatter(T), // etc...
     Shutdown,
 }
@@ -134,11 +141,11 @@ pub struct Hypercube {
     /// Map from node id to (id, address)
     addrs: HashMap<u16, Identity>,
 
-    /// Dimension of the hypercube
+    /// Dimension of the `Hypercube`
     d: u16,
 
-    /// Number of nodes: 2**d
-    n: u16,
+    /// PIDs of running `Hypernode`s in this `Hypercube`
+    pids: Option<Vec<u32>>
 }
 
 impl Hypercube {
@@ -147,10 +154,11 @@ impl Hypercube {
         let n = 2u16.pow(d.into());
 
         // Generate free system addresses, which will then be assigned to nodes
-        let addrs = util::get_available_ports(n as u16)
+        let addrs = util::get_available_ports(n as u16).expect("unable to find enough ports")
             .into_iter()
             .map(|port| format!("127.0.0.1:{port}").parse().unwrap())
             .collect::<Vec<_>>();
+
 
         // Make the Hypercube id mapping
         // Map from id to Set(ident) of adjacent nodes, where ident is (id,addr) pair
@@ -176,21 +184,23 @@ impl Hypercube {
                 .map(|(i, addr)| (i as u16, Identity::new(i as u16, addr)))
                 .collect(),
             d,
-            n,
+            pids: None
         }
     }
 
     /// Start the hypercube. Spin up 2**n `Node` processes and make them
     /// start listening for requests. Returns the PIDs of the started node
     /// processes
-    pub fn start(&self) -> Vec<u32> {
-        self.addrs
+    pub fn start(&mut self) -> &[u32] {
+        let pids = self.addrs
             .iter()
             .map(|(_, identity)| {
                 let args = [identity.id, self.d, identity.address.port()].map(|n| n.to_string());
                 Command::new(NODE_BINARY).args(args).spawn().unwrap().id()
             })
-            .collect::<Vec<u32>>()
+            .collect::<Vec<u32>>();
+        self.pids = Some(pids);
+        self.pids.as_ref().unwrap()
     }
 
     /// Send data to all nodes, from an id
