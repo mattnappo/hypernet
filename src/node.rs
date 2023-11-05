@@ -15,7 +15,7 @@ async fn main() -> Result<(), std::io::Error> {
     let d = args[2].parse().expect("invalid dimension");
     let port = &args[3];
 
-    let mut node: Hypernode<u32> = Hypernode::new(
+    let mut node: Hypernode = Hypernode::new(
         Identity::new(
             id,
             format!("127.0.0.1:{port}")

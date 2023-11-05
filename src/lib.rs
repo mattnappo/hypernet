@@ -1,7 +1,7 @@
 use async_std::net::{TcpListener, TcpStream};
 use async_std::prelude::*;
 use async_std::task::spawn;
-use futures::stream::StreamExt;
+use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 
 use std::{
@@ -52,7 +52,7 @@ enum Request {
 }
 
 /// The identity of a `Hypernode`
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Identity {
     id: u16,
     address: SocketAddr,
@@ -134,7 +134,6 @@ impl Hypernode {
     async fn handle(mut stream: TcpStream, data: u32, d: u16) -> Result<(), std::io::Error> {
         let mut buffer = [0u8; 1024];
         stream.read(&mut buffer).await.unwrap();
-        println!("handling request: {buffer:?}");
 
         // Decode and handle the request
         let request = bincode::deserialize(&buffer).unwrap();
@@ -229,22 +228,30 @@ impl Hypercube {
 
     /// Query the network to get the current value in every node.
     /// Naive implementation of allgather
-    pub fn query(&self) -> Result<HashMap<u16, u32>, std::io::Error> {
-        let values = self
-            .addrs
-            .iter()
-            .map(|(id, identity)| {
-                // TODO: async this
-                let mut stream = std::net::TcpStream::connect(identity.address).unwrap();
+    pub async fn query(&self) -> Result<HashMap<u16, u32>, std::io::Error> {
+        let values = stream::iter(self.addrs.clone())
+            .map(|(id, identity)| async move {
+                // Connect to node
+                let mut stream = TcpStream::connect(identity.address).await.unwrap();
+
+                // Write request
+                stream
+                    .write(&bincode::serialize(&Request::Value).unwrap())
+                    .await
+                    .unwrap();
+
+                // Read response
                 let mut buf = [0u8; 1024];
-                stream.read(&mut buf).unwrap();
+                stream.read(&mut buf).await.unwrap();
                 let res: Request = bincode::deserialize(&buf).unwrap();
                 match res {
                     Request::Message(m) => (id.clone(), m),
                     _ => unreachable!(),
                 }
             })
-            .collect();
+            .buffered(usize::MAX)
+            .collect()
+            .await;
         Ok(values)
     }
 
