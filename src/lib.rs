@@ -129,7 +129,10 @@ impl<T: Default> Hypernode<T> {
 #[derive(Debug)]
 pub struct Hypercube {
     /// Connections between nodes
-    graph: HashMap<u16, HashSet<Identity>>,
+    graph: HashMap<u16, HashSet<Identity>>, // TODO Remove eventually
+
+    /// Map from node id to (id, address)
+    addrs: HashMap<u16, Identity>,
 
     /// Dimension of the hypercube
     d: u16,
@@ -165,13 +168,29 @@ impl Hypercube {
             })
             .collect();
 
-        Self { graph, d, n }
+        Self {
+            graph,
+            addrs: addrs
+                .into_iter()
+                .enumerate()
+                .map(|(i, addr)| (i as u16, Identity::new(i as u16, addr)))
+                .collect(),
+            d,
+            n,
+        }
     }
 
     /// Start the hypercube. Spin up 2**n `Node` processes and make them
-    /// start listening for requests
-    pub fn start(&self) {
-        //Command::new(NODE_BINARY).args([])
+    /// start listening for requests. Returns the PIDs of the started node
+    /// processes
+    pub fn start(&self) -> Vec<u32> {
+        self.addrs
+            .iter()
+            .map(|(_, identity)| {
+                let args = [identity.id, self.d, identity.address.port()].map(|n| n.to_string());
+                Command::new(NODE_BINARY).args(args).spawn().unwrap().id()
+            })
+            .collect::<Vec<u32>>()
     }
 
     /// Send data to all nodes, from an id
