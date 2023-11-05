@@ -2,10 +2,12 @@ use async_std::net::{TcpListener, TcpStream};
 use async_std::prelude::*;
 use async_std::task::spawn;
 use futures::stream::StreamExt;
+use serde::{Deserialize, Serialize};
 
 use std::{
     collections::{HashMap, HashSet},
     hash::{Hash, Hasher},
+    io::Read,
     net::SocketAddr,
     process::Command,
     sync::{Arc, Mutex},
@@ -22,7 +24,7 @@ mod util {
 
         match ports.len() == 4 {
             true => Some(ports),
-            _ => None
+            _ => None,
         }
     }
 
@@ -35,12 +37,18 @@ mod util {
 }
 
 /// A request to a `Hypernode` on the network
-enum Request<T: Default> {
-    Message(T),
-    Broadcast(T),
-    AllGather(T),
+#[derive(Serialize, Deserialize)]
+enum Request {
+    /// An arbitrary network message
+    Message(u32),
+
+    //Broadcast(T),
+    //AllGather(T),
     //Scatter(T), // etc...
-    Shutdown,
+    /// Request the value of a node
+    Value,
+    // Request that the node shuts down
+    //Shutdown,
 }
 
 /// The identity of a `Hypernode`
@@ -67,12 +75,13 @@ impl Eq for Identity {}
 #[derive(Debug)]
 /// A `Hypernode` is a standalone process (started with Command::new()) that
 /// listens for requests from other `Hypernode`s as well as the client.
-pub struct Hypernode<T: Default> {
+pub struct Hypernode {
     /// This node's identity
     identity: Identity,
 
     /// The data stored locally in this node
-    data: Arc<Mutex<T>>,
+    //data: Arc<Mutex<u32>>, // TODO
+    data: u32,
 
     /// Dimension
     d: u16,
@@ -84,19 +93,20 @@ impl Hash for Identity {
     }
 }
 
-impl<T: Default> PartialEq for Hypernode<T> {
+impl PartialEq for Hypernode {
     fn eq(&self, other: &Self) -> bool {
         self.identity == other.identity
     }
 }
 
-impl<T: Default> Eq for Hypernode<T> {}
+impl Eq for Hypernode {}
 
-impl<T: Default> Hypernode<T> {
+impl Hypernode {
     pub fn new(identity: Identity, d: u16) -> Self {
         Self {
             identity,
-            data: Arc::new(Mutex::new(T::default())),
+            //data: Arc::new(Mutex::new(0)), // TODO
+            data: 0,
             d,
         }
     }
@@ -104,13 +114,14 @@ impl<T: Default> Hypernode<T> {
     /// Start listening for requests from other nodes, and requests from
     /// the client (a `Hypercube` struct)
     pub async fn start(&mut self) -> Result<(), std::io::Error> {
+        let datac = self.data.clone();
+        let dc = self.d.clone();
         // Needs to listen for connections and handle them
         TcpListener::bind(self.identity.address)
             .await?
             .incoming()
             .for_each_concurrent(None, |stream| async move {
-                Self::handle(stream.unwrap()).await.unwrap();
-                // TODO: use spawn here
+                Self::handle(stream.unwrap(), datac, dc).await.unwrap(); // TODO: use spawn here
             })
             .await;
 
@@ -120,11 +131,23 @@ impl<T: Default> Hypernode<T> {
 
     /// Handle an incoming request. Determine if its from another node, or the
     /// central client
-    async fn handle(mut stream: TcpStream) -> Result<(), std::io::Error> {
-        let mut buffer = [0; 1024];
+    async fn handle(mut stream: TcpStream, data: u32, d: u16) -> Result<(), std::io::Error> {
+        let mut buffer = [0u8; 1024];
         stream.read(&mut buffer).await.unwrap();
-
         println!("handling request: {buffer:?}");
+
+        // Decode and handle the request
+        let request = bincode::deserialize(&buffer).unwrap();
+        match request {
+            Request::Message(m) => {
+                println!("got message {m:?}");
+                0
+            }
+            Request::Value => stream
+                .write(&bincode::serialize(&Request::Message(data)).unwrap())
+                .await
+                .unwrap(),
+        };
 
         Ok(())
     }
@@ -145,7 +168,7 @@ pub struct Hypercube {
     d: u16,
 
     /// PIDs of running `Hypernode`s in this `Hypercube`
-    pids: Option<Vec<u32>>
+    pids: Option<Vec<u32>>,
 }
 
 impl Hypercube {
@@ -154,11 +177,11 @@ impl Hypercube {
         let n = 2u16.pow(d.into());
 
         // Generate free system addresses, which will then be assigned to nodes
-        let addrs = util::get_available_ports(n as u16).expect("unable to find enough ports")
+        let addrs = util::get_available_ports(n as u16)
+            .expect("unable to find enough ports")
             .into_iter()
             .map(|port| format!("127.0.0.1:{port}").parse().unwrap())
             .collect::<Vec<_>>();
-
 
         // Make the Hypercube id mapping
         // Map from id to Set(ident) of adjacent nodes, where ident is (id,addr) pair
@@ -184,7 +207,7 @@ impl Hypercube {
                 .map(|(i, addr)| (i as u16, Identity::new(i as u16, addr)))
                 .collect(),
             d,
-            pids: None
+            pids: None,
         }
     }
 
@@ -192,7 +215,8 @@ impl Hypercube {
     /// start listening for requests. Returns the PIDs of the started node
     /// processes
     pub fn start(&mut self) -> &[u32] {
-        let pids = self.addrs
+        let pids = self
+            .addrs
             .iter()
             .map(|(_, identity)| {
                 let args = [identity.id, self.d, identity.address.port()].map(|n| n.to_string());
@@ -203,8 +227,41 @@ impl Hypercube {
         self.pids.as_ref().unwrap()
     }
 
-    /// Send data to all nodes, from an id
-    pub fn broadcast<T>(&self, from: u32, data: T) {}
+    /// Query the network to get the current value in every node.
+    /// Naive implementation of allgather
+    pub fn query(&self) -> Result<HashMap<u16, u32>, std::io::Error> {
+        let values = self
+            .addrs
+            .iter()
+            .map(|(id, identity)| {
+                // TODO: async this
+                let mut stream = std::net::TcpStream::connect(identity.address).unwrap();
+                let mut buf = [0u8; 1024];
+                stream.read(&mut buf).unwrap();
+                let res: Request = bincode::deserialize(&buf).unwrap();
+                match res {
+                    Request::Message(m) => (id.clone(), m),
+                    _ => unreachable!(),
+                }
+            })
+            .collect();
+        Ok(values)
+    }
+
+    /// A network test function. Each node initially stores 0.
+    /// All nodes listen for requests
+    /// Upon a node getting a request from another node with message p:
+    /// 1. If current (receiving node) value is 0:
+    ///    (i ) Send each neighbor the nodes current value plus p + 1
+    ///    (ii) Set its current value to current_val + p +1 (which is just p+1)
+    /// 2. If current value is not 0:
+    ///    (i) Set its current value to current_val + p
+    /// This process starts off by the main client sending a request to the 0
+    /// node with value 0
+    pub fn monotonic(&mut self) {}
+
+    /// Broadcast `value` to all nodes starting from node with id `from`
+    pub fn broadcast<T>(&self, from: u32, value: T) {}
 }
 
 #[cfg(test)]
