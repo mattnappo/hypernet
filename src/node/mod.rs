@@ -1,30 +1,14 @@
 #![allow(dead_code)]
 
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use local_ip_address::local_ip;
 use log::{debug, info};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-use crate::protocol::{Message, Peer};
-
-pub struct Identity {
-    ip: IpAddr,
-    port: u16,
-}
-
-impl Identity {
-    pub fn new(ip: IpAddr, port: u16) -> Identity {
-        Identity { ip, port }
-    }
-
-    pub fn address(&self) -> String {
-        format!("{}:{}", self.ip, self.port)
-    }
-}
+use crate::protocol::{Identity, Message, Peer, MAX_MESSAGE_SIZE};
 
 // type Label = u32;
 
@@ -58,66 +42,70 @@ impl Node {
             let t0 = std::time::Instant::now();
             info!("accepted new connection from {addr:?}");
             // Read from client
-            let mut buf = [0; 1024];
+            let mut buf = [0; MAX_MESSAGE_SIZE];
             let len = socket.read(&mut buf).await?;
-            debug!("read {} bytes: {:?}", len, &buf[..len]);
+            if len > MAX_MESSAGE_SIZE {
+                bail!("message cannot be read: it is too large")
+            }
+            debug!("read {} bytes", len);
             let req: Message = rmp_serde::from_slice(&buf[0..len])?;
             info!("handling request {:?} from {addr:?}", req);
-
-            let res = match req {
-                Message::Ping => Message::Pong,
-                Message::PeerInfo(peers) => {
-                    for Peer { label, ip, port } in peers {
-                        self.peers.insert(label, Identity { ip, port });
-                    }
-                    Message::Ok
-                }
-                _ => unimplemented!(),
-            };
+            let res = self.request_handler(req).await?;
             socket.write_all(&rmp_serde::to_vec(&res)?).await?;
             info!(
                 "wrote {res:?} to {addr:?} in {:?}us",
                 std::time::Instant::elapsed(&t0).as_micros()
             );
         }
-
-        Ok(())
     }
-}
 
-/// Request handlers.
-trait Server {
-    //async fn handle_ping(&self);
-    //async fn set_peers(&mut self);
+    async fn request_handler(&mut self, req: Message) -> Result<Message> {
+        Ok(match req {
+            Message::Ping => Message::Pong,
+            Message::SetPeerInfo(peers) => {
+                for Peer { label, ip, port } in peers {
+                    self.peers.insert(label, Identity { ip, port });
+                }
+                Message::Ok
+            }
+            Message::GetPeerInfo => Message::PeerInfo(self.peers.clone()),
+            r => Message::Err(format!("unknown request type {r:?}")),
+        })
+    }
 }
 
 /// Request senders for point-to-point communications.
 trait Client {
     async fn send_ping(&self, peer: &Identity) -> Result<Message>;
     async fn set_peers(&mut self, peer: &Identity, peers: Vec<Peer>) -> Result<Message>;
+    async fn get_peers(&mut self, peer: &Identity) -> Result<Message>;
 }
 
-impl Server for Node {
-    // async fn ping(&self) {}
-    //async fn set_peers(&mut self) {}
-}
-
-// TODO: make a helper for these like TaskRpc
+/// A top level interface to a node.
 impl Client for Node {
     async fn send_ping(&self, peer: &Identity) -> Result<Message> {
         send_helper(peer, &Message::Ping).await
     }
 
     async fn set_peers(&mut self, peer: &Identity, peers: Vec<Peer>) -> Result<Message> {
-        send_helper(peer, &Message::PeerInfo(peers)).await
+        send_helper(peer, &Message::SetPeerInfo(peers)).await
+    }
+
+    async fn get_peers(&mut self, peer: &Identity) -> Result<Message> {
+        send_helper(peer, &Message::GetPeerInfo).await
     }
 }
 
 async fn send_helper(peer: &Identity, req: &Message) -> Result<Message> {
     // Connect, write req, and read res
     let mut conn = TcpStream::connect(peer.address()).await?;
-    conn.write_all(&rmp_serde::to_vec(req)?).await?;
-    let mut buf = [0; 1024];
+    let serialized_req = &rmp_serde::to_vec(req)?;
+    if serialized_req.len() > MAX_MESSAGE_SIZE {
+        bail!("message {req:?} exceeds the maximum message size");
+    }
+
+    conn.write_all(serialized_req).await?;
+    let mut buf = [0; MAX_MESSAGE_SIZE];
     let len = conn.read(&mut buf).await?;
     let res: Message = rmp_serde::from_slice(&buf[0..len])?;
     Ok(res)
@@ -149,13 +137,45 @@ mod tests {
     #[tokio::test]
     async fn test_send_peer() -> Result<()> {
         let mut node_client = Node::new(9090)?;
+        let i = &identity();
         let peers = vec![Peer {
             label: 100,
             ip: "127.0.0.1".parse()?,
             port: 9000,
         }];
-        let res = node_client.set_peers(&identity(), peers).await?;
+        let res = node_client.set_peers(i, peers).await?;
         assert_eq!(res, Message::Ok);
+
+        let res = node_client.get_peers(i).await?;
+        assert_eq!(
+            res,
+            Message::PeerInfo(HashMap::from([(
+                100,
+                Identity {
+                    ip: "127.0.0.1".parse()?,
+                    port: 9000,
+                }
+            )]))
+        );
+
+        // Now update peer 100
+        let peers = vec![Peer {
+            label: 100,
+            ip: "127.0.0.1".parse()?,
+            port: 9001,
+        }];
+        node_client.set_peers(i, peers).await?;
+        let res = node_client.get_peers(i).await?;
+        assert_eq!(
+            res,
+            Message::PeerInfo(HashMap::from([(
+                100,
+                Identity {
+                    ip: "127.0.0.1".parse()?,
+                    port: 9001,
+                }
+            )]))
+        );
         Ok(())
     }
 }
