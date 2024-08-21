@@ -14,7 +14,7 @@ async fn main() -> Result<()> {
     env_logger::init();
     let args = Args::parse();
 
-    let node = Node::new(args.port)?;
+    let mut node = Node::new(args.port)?;
     node.start().await?;
 
     Ok(())
